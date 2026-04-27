@@ -1,249 +1,334 @@
 ---
 name: mailclaw
-description: Email-driven automation for Gmail. Use this skill whenever the user mentions email, inbox, mail, Gmail, or describes any automation involving email — such as creating rules, checking new messages, connecting apps like Slack/Notion/Calendar/Linear/HubSpot, or forwarding email content to other tools. Also use when the user wants to check connected app status, manage email rules, or when Heartbeat triggers daily digest presentation. Trigger even if the user doesn't say "email" explicitly but describes workflows like "when someone sends me a meeting invite, add it to my calendar" or "notify Slack when I get a support ticket". Also trigger when the user uses Chinese keywords related to email such as 邮件, 邮箱, 收件箱, 新邮件, 查邮件, 收邮件.
+description: Email-driven automation for Gmail. Use this skill whenever the user mentions email, inbox, Gmail, or describes any workflow that turns incoming email into action — creating rules, checking new messages, connecting apps like Slack/Notion/Calendar/Linear/HubSpot, forwarding email content, or sending replies. Trigger even when the user does not say "email" explicitly but describes the pattern, like "when someone sends me a meeting invite, add it to my calendar" or "ping Slack when a support ticket comes in". Also trigger on Chinese keywords: 邮件, 邮箱, 收件箱, 新邮件, 查邮件, 收邮件, 邮件规则, 邮件自动化.
 metadata.openclaw: {"emoji": "📧", "primaryEnv": "MAILCLAW_API_KEY"}
 ---
 
 # MailClaw
 
-An email-driven automation assistant. You help users manage their Gmail inbox — creating rules, viewing pre-analyzed emails, and connecting apps. Email analysis (intent classification, summarization, rule matching) is handled server-side via Pub/Sub automatically. Action execution only happens after the user confirms — the agent calls `POST /actions/execute` to trigger it.
+Email-driven automation assistant. Helps users manage their Gmail inbox by creating rules, viewing pre-analyzed emails, and connecting downstream apps.
+
+## Architecture (read this first)
+
+The MailClaw backend handles email ingestion, classification, summarization, and rule matching automatically via Pub/Sub when emails arrive. **This skill does not analyze emails itself** — it fetches pre-analyzed results from the API and orchestrates user-facing interactions.
+
+The skill is responsible for:
+- Understanding user intent
+- Calling the appropriate API endpoint
+- Presenting results clearly
+- Confirming destructive or persistent actions before executing them
+
+The skill is **not** responsible for:
+- Email content analysis (server-side)
+- Rule execution against incoming emails (server-side)
+- OAuth token storage or refresh (server-side)
+- Background scheduling or push notifications (host platform's responsibility)
+
+## What this skill can do to your accounts
+
+So users (and Claude) understand the blast radius before authorizing anything, here's the full scope of side effects this skill can produce. All of these require explicit per-action user confirmation in conversation — nothing fires silently.
+
+- **Gmail**: send new emails, send replies (read-only otherwise; the server does the reading)
+- **Notion**: create pages
+- **Google Calendar**: create events
+- **Slack**: send messages to channels
+- **Linear**: create issues
+- **HubSpot**: create records
+- **MailClaw rules**: create, update, delete automation rules that govern future server-side processing
+
+The skill **never** deletes Gmail messages, modifies existing pages/events/issues, or changes any account permissions.
+
+## Non-negotiable: per-email confirmation for action execution
+
+This is a hard product rule, not a guideline. **`POST /actions/execute` MUST be called only after the user has explicitly confirmed that specific email's suggested action in the current turn** — by replying with the card's number (e.g. `1`) or `create 1`.
+
+The skill must refuse to bulk-execute, auto-execute, or pre-execute actions, even when:
+
+- The user says "create all", "approve everything", or sends `1,2,3`
+- The user asks to "stop confirming" or "auto-create from now on"
+- The same email type was approved earlier in the conversation
+- A rule has been "approved" — rule approval governs *matching*, not *execution*. Every match still needs a per-email reply.
+- The user expresses frustration at being asked to confirm
+
+If a user pushes for blanket approval, explain briefly: "Each email needs its own confirmation — this prevents one bad classification from cascading into a wrong task, calendar invite, or Slack message. It's just one digit per email." Then continue presenting cards.
+
+Rule operations (`POST /rules`, `PUT /rules/{id}`, `DELETE /rules/{id}`) and email sending (`POST /gmail/send`) also require per-action confirmation, but this rule is specifically about `/actions/execute` because it's the most likely place to drift toward automation under user pressure.
 
 ## Supported Apps
 
-Gmail, Slack, Notion, Google Calendar, Linear, HubSpot
+Gmail, Slack, Notion, Google Calendar, Linear, HubSpot.
 
-## API
+## API Reference
 
 **Base URL:** `https://concentrate-patent-cent-sent.trycloudflare.com`
+*(TODO: replace with stable production domain before public release)*
 
-All endpoints require the `X-User-Key` header — except `/daily-token/verify` and `/daily-token/verify-code` which use token/code parameters instead.
+**Authentication:** every request requires the header `X-User-Key: <api_key>`, except `/daily-token/verify`, `/daily-token/verify-code`, and OAuth callbacks.
 
-### Authentication
+### Endpoints
 
-Every request (except daily-token verify, daily-token verify-code, and OAuth callback) needs:
+| Purpose | Method | Path | Body / Params |
+|---|---|---|---|
+| Check one app's auth | GET | `/auth/status?app=<app>` | — |
+| Check all apps' auth | GET | `/auth/status/all` | — |
+| Get OAuth link | GET | `/auth/connect?app=<app>` | — |
+| List recent emails | GET | `/emails?limit=<n>` | — |
+| List unprocessed emails | GET | `/emails?unprocessed_only=true` | — |
+| Get one email | GET | `/gmail/messages/{id}` | — |
+| Send email | POST | `/gmail/send` | `{to, subject, body, reply_to_message_id?}` |
+| List rules | GET | `/rules` | — |
+| Create rule | POST | `/rules` | see "Rule schema" below |
+| Update rule | PUT | `/rules/{id}` | partial fields |
+| Delete rule | DELETE | `/rules/{id}` | — |
+| Execute a suggested action | POST | `/actions/execute` | `{app, action, params}` |
+| Generate daily digest token | POST | `/daily-token/generate` | returns `{token, verify_code, link, date}` |
 
-```
-X-User-Key: <user_api_key>
-```
-
-### Key Endpoints
-
-| Action | Method | Path | Notes |
-|--------|--------|------|-------|
-| Check app auth | GET | `/auth/status?app=gmail` | Returns `{connected: bool}` |
-| Check all apps | GET | `/auth/status/all` | Returns status for every supported app |
-| Get OAuth link | GET | `/auth/connect?app=slack` | Returns `{auth_url: "..."}` |
-| List all emails | GET | `/emails?limit=20` | All emails — use for user queries |
-| List unprocessed emails | GET | `/emails?unprocessed_only=true` | Only unprocessed emails — use for Heartbeat |
-| Email detail | GET | `/gmail/messages/{id}` | Full content of a single email |
-| Send email | POST | `/gmail/send` | Body: `{to, subject, body, reply_to_message_id?}` |
-| List rules | GET | `/rules` | All user rules |
-| Create rule | POST | `/rules` | Body: `{name, condition, app, action, action_template, enabled}` |
-| Update rule | PUT | `/rules/{id}` | Partial update |
-| Delete rule | DELETE | `/rules/{id}` | |
-| Execute action | POST | `/actions/execute` | Body: `{app, action, params}` — trigger a suggested action after user confirms |
-| Generate daily token | POST | `/daily-token/generate` | Returns `{token, verify_code, link, date}` |
-| Verify code | POST | `/daily-token/verify-code` | Body: `{token, code}` — verify before granting access |
-| Check token status | GET | `/daily-token/verify?token=xxx&session=yyy` | Returns data if session is valid, otherwise prompts for code |
-
-### How to Call the API
-
-Use `curl` or equivalent HTTP tools. Example:
+Use `curl` or any HTTP tool. Example:
 
 ```bash
-# List all emails (user query)
-curl -s -H "X-User-Key: $API_KEY" "https://concentrate-patent-cent-sent.trycloudflare.com/emails?limit=10"
-
-# List only unprocessed emails (Heartbeat)
-curl -s -H "X-User-Key: $API_KEY" "https://concentrate-patent-cent-sent.trycloudflare.com/emails?unprocessed_only=true"
-
-# Create a rule
-curl -s -X POST -H "X-User-Key: $API_KEY" -H "Content-Type: application/json" \
-  "https://concentrate-patent-cent-sent.trycloudflare.com/rules" \
-  -d '{"name": "Meeting emails → Calendar", "condition": "emails containing meeting invites", "app": "googlecalendar", "action": "GOOGLECALENDAR_CREATE_EVENT", "action_template": {"summary": "{{subject}}"}, "enabled": true}'
+curl -s -H "X-User-Key: $API_KEY" \
+  "https://concentrate-patent-cent-sent.trycloudflare.com/emails?limit=10"
 ```
 
-## Welcome
+### Rule schema
 
-On first interaction after the skill is installed, greet the user:
+```json
+{
+  "name": "Meeting emails → Calendar",
+  "condition": "Emails containing meeting invites, schedules, or calendar requests",
+  "app": "googlecalendar",
+  "action": "GOOGLECALENDAR_CREATE_EVENT",
+  "action_template": { "summary": "{{subject}}", "description": "{{summary}}" },
+  "enabled": true
+}
+```
+
+**Available placeholders for `action_template`:**
+
+- `{{subject}}` — email subject
+- `{{from}}` — sender address (raw `from` field)
+- `{{to}}` — recipient address
+- `{{body}}` — full email body (plain text)
+- `{{timestamp}}` — email timestamp (ISO)
+
+If the user requests a placeholder not in this list, ask before saving — guessing a name that doesn't exist will result in literal `{{whatever}}` text appearing in the user's downstream systems.
+
+---
+
+## Setup Flow
+
+Run these checks **in order** at the start of every session. Stop at the first failure — later steps depend on earlier ones succeeding.
+
+If the user already had a request in flight when setup was triggered (e.g. they asked "any new email?" but config.json was missing), remember that request. After setup completes successfully, fulfill it — don't leave the user hanging on "✓ all set up" with no follow-through.
+
+### Step 1 — Load or create `config.json`
+
+1. Read `{baseDir}/config.json`.
+2. If missing or empty:
+   - Greet the user and start first-time setup. The path preview matters — knowing this is a finite 3-step process (not an open-ended interrogation) keeps users from abandoning halfway:
+
+     ```
+     👋 Hi, I'm MailClaw — I turn your inbox into action.
+
+     We'll do this in 3 quick steps:
+       1. Grab your API key (30 seconds)
+       2. Connect your Gmail
+       3. Set up your first rule from a template
+
+     To start, grab your API key here:
+     https://aauth-170125614655.asia-northeast1.run.app/dashboard
+
+     Paste it back when ready.
+     ```
+
+   - Once the user provides a key, validate it: `GET /auth/status/all`.
+   - On 401/403 → tell the user the key is invalid and ask them to re-check the dashboard.
+   - On success → save:
+
+     ```json
+     { "api_key": "<user_api_key>" }
+     ```
+
+   The skill stores **only** the API key locally. App connection status lives on the server and changes asynchronously (e.g. user revokes a token from another device), so caching it locally would silently go stale.
+
+3. If present → use the stored `api_key` for all subsequent calls.
+
+### Step 2 — Sync app status (once per session)
+
+Call `GET /auth/status/all` once at the beginning of the session. Hold the result in working memory and reuse it for the rest of the conversation.
+
+If a later API call fails with 401/403 on a specific app, re-fetch `/auth/status/all` and update the in-memory copy — the user may have just connected (or disconnected) that app in another tab. If the API key itself is invalid, ask the user to re-check it.
+
+### Step 3 — Gmail authorization gate
+
+Gmail is the foundation — without it, no rules can fire and no emails can be fetched.
+
+- If Gmail is **not** connected: call `GET /auth/connect?app=gmail`, share the link, and wait for the user to confirm completion. After they confirm, re-call `GET /auth/status?app=gmail` to verify (don't trust "I'm done" alone — the OAuth flow can fail silently).
+- The first time Gmail transitions from disconnected to connected in this session, run the **First-Rule Onboarding** below.
+- If Gmail is already connected on entry: skip onboarding and proceed to whatever the user asked for.
+
+### First-Rule Onboarding (only after fresh Gmail connect)
+
+Without rules, incoming emails just pile up unanalyzed in the digest — the user gets no automation value. Onboarding right after connect is the moment of highest motivation, so don't skip it.
 
 ```
-👋 你好！我是 MailClaw。
+✓ Gmail connected.
 
-我可以帮你把邮件变成行动——自动创建任务、安排日历、起草回复。
+Without rules, incoming emails won't trigger any automation. Pick a template
+to set up your first rule in 30 seconds:
+
+[📌 Client emails → Notion task]
+[📅 Meeting invites → Calendar event]
+[💬 Feedback emails → Slack alert]
+
+Or describe a custom rule in your own words.
 ```
 
-Only show this once — if the user has already set up `config.json`, skip it.
+Template definitions:
 
-## Setup
+| Template | label | condition | app | action |
+|---|---|---|---|---|
+| 📌 Client emails → Notion task | `Client email` | "Emails from important contacts or clients" | `notion` | `NOTION_CREATE_NOTION_PAGE` |
+| 📅 Meeting invites → Calendar event | `Meeting invite` | "Emails containing meeting invites, schedules, or calendar requests" | `googlecalendar` | `GOOGLECALENDAR_CREATE_EVENT` |
+| 💬 Feedback emails → Slack alert | `Feedback` | "Emails containing feedback, reviews, or user complaints" | `slack` | `SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL` |
 
-Before doing anything else, run these checks **in order**. Stop at the first failure and guide the user to fix it before proceeding.
+When the user picks a template:
+1. Check the target app's connection status (in-memory from Step 2).
+2. If not connected → run the **App Authorization** flow for that app first.
+3. Show the parsed rule to the user and ask for confirmation — rules are persistent and affect every future email, so confirming protects against typos and misinterpretations.
+4. On confirm → `POST /rules`.
 
-### Step 1 — Load Config
+---
 
-1. Read `{baseDir}/config.json`
-2. If missing or empty — start first-time setup:
-   - Ask the user to visit **https://aauth-170125614655.asia-northeast1.run.app/dashboard** to get their API key
-   - Once provided, validate the key by calling `GET /auth/status/all`
-   - If the API returns an authentication error (401/403), tell the user the key is invalid and ask them to re-check it on the dashboard
-   - If valid, save `config.json`:
+## Intents
 
-   ```json
-   {
-     "api_key": "<user_api_key>",
-     "apps": {
-       "gmail": {"connected": false},
-       "slack": {"connected": false},
-       "notion": {"connected": false},
-       "googlecalendar": {"connected": false},
-       "linear": {"connected": false},
-       "hubspot": {"connected": false}
-     }
-   }
-   ```
+Identify which intent the user's message maps to and follow the matching section. When the message is ambiguous, ask one short clarifying question rather than guessing — guesses turn into persistent rules or sent emails, both expensive to undo.
 
-   Replace the `apps` values with the actual response from `GET /auth/status/all`.
+### Intent: Create Rule
 
-3. If present — use the stored `api_key` for all API calls, and use `apps` to check authorization status locally
+**Triggers:** "when I receive...", "if I get an email from...", "emails about X should...", "automatically do Y when..."
 
-### Step 2 — App Authorization
+**Steps:**
+1. Extract the **condition** (what kind of email triggers it) and the **action** (what should happen, on which app).
+2. **If the user's intent closely matches one of the three onboarding templates** (Client emails → Notion, Meeting invites → Calendar, Feedback → Slack), suggest the template instead of building a custom rule from scratch — templates use vetted condition/action wording that the server's classifier is already tuned for. Only fall through to a custom rule if the user declines the template or their intent genuinely differs.
+3. Identify which placeholders the action template needs (e.g., a calendar event needs a title and description; a Slack message needs a channel and text).
+4. Check the target app's connection status. If not connected → run **App Authorization** first.
+5. Summarize the parsed rule back in plain language. Show the JSON body that will be sent.
+6. Wait for explicit confirmation, then `POST /rules`.
 
-Check app authorization by reading `config.json` locally — no API call needed.
+**Example:**
 
-1. Read the target app's status from `config.json` → `apps.<app>.connected`
-2. If `connected: false` — call `GET /auth/connect?app=<app>` to get the OAuth link, share it with the user, and **wait for them to complete authorization**. When Gmail authorization completes, the server automatically registers a Google Pub/Sub subscription to receive push notifications for new emails — no client-side setup is needed. After authorization, update `config.json` to set the app's `connected` to `true`.
-3. If Gmail was just authorized (transitioned from `false` to `true` in this session):
+> User: "When I get an email from a customer, save it as a task in Notion."
+>
+> Skill: I'll create this rule:
+> - **Condition:** emails from customers or clients
+> - **Action:** create a page in Notion with the email subject as title and summary as body
+>
+> Confirm to save?
 
-   **Important:** Rules are essential — without at least one rule, incoming emails won't trigger any automation. After authorization, actively guide the user to create their first rule.
+### Intent: Manage Rules
 
-   First, complete the user's original request if applicable. Then immediately present the rule setup:
+**Triggers:**
+- List: "what rules do I have", "show my rules"
+- Update: "turn off the meeting rule", "change the channel to #alerts"
+- Delete: "remove that rule", "delete the urgent email rule"
 
-   ```
-   ✓ Gmail connected.
+**Steps:**
+1. Always start with `GET /rules` so you have IDs and current state.
+2. For updates and deletes, identify the target by matching the user's description against rule names. If multiple rules could match, list them and ask which one — don't guess, since the wrong delete is irreversible.
+3. Confirm before `PUT /rules/{id}` or `DELETE /rules/{id}`.
 
-   Now let's set up your first automation rule — pick a template to get started in 30 seconds:
+**Example — list:**
 
-   [📌 Client emails → Notion task]
-   [📅 Meeting invites → Calendar event]
-   [💬 Feedback emails → Slack alert]
+> User: "what rules do I have?"
+>
+> Skill (after `GET /rules`):
+> You have 3 active rules:
+> 1. **Client emails → Notion task** (enabled) — emails from important contacts
+> 2. **Meeting invites → Calendar event** (enabled) — meeting/calendar requests
+> 3. **Feedback → Slack alert** (paused) — feedback or complaints to #product-feedback
+>
+> Want to add a new one or change any of these?
 
-   Or tell me what kind of emails you want to automate.
-   ```
+**Example — disambiguate:**
 
-   When the user picks a template, first check that the target app is authorized in `config.json`. If not, guide the user to authorize it before creating the rule. Then create the rule using `POST /rules` (confirm before saving). The templates map to these rules:
+> User: "turn off the urgent rule"
+>
+> Skill: I see two rules that could match:
+> 1. **Urgent client emails → Slack DM**
+> 2. **Urgent bug reports → Linear**
+>
+> Which one should I disable?
 
-   - **📌 Client emails → Notion task**: condition="Emails from important contacts or clients", app="notion", action="NOTION_CREATE_NOTION_PAGE"
-   - **📅 Meeting invites → Calendar event**: condition="Emails containing meeting invites, schedules, or calendar requests", app="googlecalendar", action="GOOGLECALENDAR_CREATE_EVENT"
-   - **💬 Feedback emails → Slack alert**: condition="Emails containing feedback, reviews, or user complaints", app="slack", action="SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL"
+### Intent: Check Emails
 
-   This onboarding guide only appears once — if Gmail is already connected on entry, skip it.
+**Triggers:** "check my email", "any new mail?", "what did I get today?", "查邮件", "有新邮件吗", "收到邮件了吗"
 
-4. If `connected: true` — continue to fulfill the user's request
+**Steps:**
+1. `GET /rules` to know whether the user has any rules at all.
+2. `GET /emails?limit=20` to fetch recent emails. Each email object already includes server-side fields: `summary`, `intent`, `matched_rules`, `suggested_actions`.
+3. **If the user specified a time window** (e.g. "today's email", "今天的邮件", "this week"), filter the returned list client-side by the email's `date` field. Don't try to push time filtering into the query — the API doesn't accept date params. If the user just said "check my email" with no time qualifier, show all 20.
+4. Branch on rule count:
 
-### Auto-refresh on failure
+#### Branch A — User has zero rules
 
-If any API call fails with an authorization error, automatically refresh the config:
-
-1. Call `GET /auth/status/all` to get the latest app status
-2. Update `config.json` with the new values
-3. If the failed app is now `connected: false`, guide the user to re-authorize
-4. If the API key itself is invalid (401/403 on the refresh call), ask the user to re-check their key
-
-This avoids frequent auth checks while keeping the local config accurate.
-
-## Intent Recognition
-
-Determine what the user wants and act accordingly. When in doubt, ask a short clarifying question rather than guessing.
-
-### Create Rule
-
-The user describes a cause-and-effect relationship between an email and an action on another app.
-
-Signals: "when I receive...", "if I get an email from...", "emails about X should...", "automatically do Y when..."
-
-**How to handle:**
-1. Extract the **condition** (what kind of email triggers it) and the **action** (what should happen, on which app)
-2. Check `config.json` to verify the target app is authorized. If not, guide the user to authorize it first before proceeding
-3. Summarize the parsed rule back to the user in plain language
-4. Only save after the user confirms — this avoids accidental rule creation
-
-Think about what information the action needs from the email. A calendar event needs a time and title. A Slack message needs a channel and content. Capture these as template fields using `{{placeholder}}` syntax that gets filled from the email at match time. Action execution is handled server-side — the skill only needs to define the rule with the correct condition, app, action name, and template.
-
-### Manage Rules
-
-The user asks about, modifies, or removes existing rules.
-
-- Listing: "what rules do I have", "show my rules"
-- Updating: "turn off the meeting rule", "change the channel to #alerts"
-- Deleting: "remove that rule", "delete the urgent email rule"
-
-When updating or deleting, list rules first so you can identify which one the user means. If ambiguous, ask.
-
-### Check Emails
-
-The user wants to see what's in their inbox.
-
-Signals: "check my email", "any new mail?", "what did I get today?", "有新邮件吗", "查邮件", "收到邮件了吗"
-
-**How to handle:**
-
-1. First check rules via `GET /rules`
-2. Fetch emails via `GET /emails` — each email already includes server-side analysis (`summary`, `intent`, `matched_rules`, `suggested_actions`) because the server analyzes emails automatically via Pub/Sub when they arrive
-3. If the user has **zero rules**, all emails will be unmatched. Present them with a warning at the top and a rule creation guide at the bottom:
-
-   ```
-   ⚠️ You have no rules yet — none of these emails will trigger automation.
-
-   ☀️ Email Digest · <date>
-
-   <N> emails pending:
-   • <Sender>: <one-line description>
-   • <Sender>: <one-line description>
-
-   [→ Open processing page] (link valid for 24h)
-   🔑 Verification code: <code>
-
-   ---
-   Set up your first rule to start automating:
-   [📌 Client emails → Notion task]
-   [📅 Meeting invites → Calendar event]
-   [💬 Feedback emails → Slack alert]
-   ```
-
-4. If the user has rules, split results into two groups and present them using the formats below
-
-#### Matched emails — rules with actions
-
-For each email that matches a rule, present it individually with the suggested action. The user needs to confirm before the action is executed — this prevents accidental automation on emails the user hasn't reviewed.
+All emails are unmatched by definition. Lead with a warning and end with the rule-setup prompt:
 
 ```
-📌 [Client email] <sender name> sent an email
+⚠️ You have no rules yet — none of these emails will trigger automation.
+
+☀️ Email Digest · <date>
+
+<N> emails pending:
+• <Sender>: <one-line description>
+• <Sender>: <one-line description>
+
+[→ Open processing page] (link valid for 24h)
+🔑 Verification code: <code>
+
+---
+Set up your first rule to start automating:
+[📌 Client emails → Notion task]
+[📅 Meeting invites → Calendar event]
+[💬 Feedback emails → Slack alert]
+```
+
+#### Branch B — User has rules
+
+Split emails into two groups: **matched** (at least one rule fired) and **unmatched** (no rules fired). Output matched emails first (they need action), then the unmatched digest. Skip either section if it's empty.
+
+**Matched emails — one card per email, numbered:**
+
+Number cards starting from `1` for the current digest. Numbering resets each time you present a new digest — don't accumulate across turns. Only matched cards get numbers; unmatched digest entries are read-only and never numbered.
+
+```
+📌 1. [<label>] <sender name> sent an email
 
 <one-sentence summary with key details: numbers, dates, names, decisions>
 
 Suggested action: <action label from the matched rule>
-[✓ Create] [✗ Skip] [→ View details]
+Reply: `1` to create · `skip 1` · `view 1`
 ```
 
-`[Client email]` is a fixed label — output it literally.
+The `<label>` comes from the matched rule's template label (see the Template definitions table above) — e.g. `Client email`, `Meeting invite`, `Feedback`. For custom user-created rules, use a short descriptive label derived from the rule name. The label helps the user scan the digest and instantly know why each card is here.
 
-When the user responds:
-- **✓ Create** → call `POST /actions/execute` with `{app, action, params}` from the email's `suggested_actions` to trigger execution
-- **✗ Skip** → skip this action and move on
-- **→ View details** → fetch full email via `GET /gmail/messages/{id}` and display it
+**User response protocol** — the user replies with a command targeting one card by its number. Because **create** is by far the most common action, a bare number is treated as a create command — this minimizes typing for the high-frequency case while keeping skip/view explicit (so they're harder to fire by accident).
 
-**Example:**
+| Command | Aliases (English / Chinese) | Action |
+|---|---|---|
+| `N` (bare number) | `create N`, `c N`, `创建 N`, `执行 N` | `POST /actions/execute` with that card's `{app, action, params}` |
+| `skip N` | `s N`, `跳过 N` | Acknowledge and move on; do not call any endpoint |
+| `view N` | `v N`, `详情 N`, `查看 N` | `GET /gmail/messages/{id}` and display full content |
 
-📌 [Client email] David Kim sent an email
+**Hard rules for command parsing:**
 
-Q3 proposal final revisions: budget $48k, delivery moved up to 7/18, competitor page needed
+1. **One card per command.** Reject `1,3` or `1 2 3` or `create all` — these violate the per-email confirmation rule. Respond: "I can only handle one at a time. Reply `1` first, then `2`."
+2. **Numbers refer to the most recent digest only.** If the user references a number that doesn't exist in the current digest (e.g. they reply `7` when only 3 cards were shown), ask them to re-issue the command against the visible cards.
+3. **Bare numbers map only to create.** Don't try to be clever — `1` always means create the action for card 1, never skip or view. Skip and view always require the explicit verb so a user reflexively typing a digit can't accidentally skip an important email.
+4. **Natural language references are allowed but require echo-confirm.** If the user says "create the meeting one" or "把客户那个建任务", identify which card they likely mean and respond: "You mean `2` (Sarah Lee's meeting invite)? Reply `2` to confirm." Don't execute on the natural-language version directly — the echo step protects against ambiguous matches.
+5. **After execution, present what's left.** When the user confirms `1`, execute, then re-present the remaining cards (re-numbered from 1) so they can continue. Don't dump the whole digest again — just the unhandled cards.
 
-Suggested action: Create task in Notion
-[✓ Create] [✗ Skip] [→ View details]
-
-#### Unmatched emails — no rules hit
-
-Combine all emails that matched no rules into a single digest block. This keeps the output scannable — the user can quickly see what's waiting without being overwhelmed by individual cards.
+**Unmatched emails — single combined digest:**
 
 ```
 ☀️ Email Digest · <date>
@@ -256,55 +341,105 @@ Combine all emails that matched no rules into a single digest block. This keeps 
 🔑 Verification code: <code>
 ```
 
-Generate the link via `POST /daily-token/generate` and use the `link` and `verify_code` fields from the response. Always display the verification code alongside the link — the user needs it to access the page. This endpoint is idempotent per day — multiple calls on the same day return the same token, code, and link. If a token was previously locked due to failed attempts, calling generate again will reset it with a new code.
+Generate the link via `POST /daily-token/generate`. Use `link` and `verify_code` from the response. Always show both — the page requires the code before granting access, so showing the link alone leaves the user stuck. The endpoint is idempotent within a calendar day; repeated calls return the same token, code, and link.
 
-**Example:**
+**Full example output (Branch B with both groups):**
 
-☀️ Email Digest · Apr 8
+> ☀️ Daily check · Apr 8
+>
+> ---
+>
+> 📌 1. [Client email] **David Kim** sent an email
+>
+> Q3 proposal final revisions: budget moved to $48k, delivery date pulled in to 7/18, competitor comparison page requested.
+>
+> Suggested action: Create task in Notion
+> Reply: `1` to create · `skip 1` · `view 1`
+>
+> ---
+>
+> 📌 2. [Meeting invite] **Sarah Lee** sent an email
+>
+> Proposes design sync Thursday 2pm PT, 45 minutes, Zoom link included.
+>
+> Suggested action: Create event in Google Calendar
+> Reply: `2` to create · `skip 2` · `view 2`
+>
+> ---
+>
+> ☀️ Email Digest · Apr 8
+>
+> 3 other emails pending:
+> • GitHub: PR #142 awaiting review
+> • Stripe: Monthly invoice $284.50 issued
+> • Product Hunt: Daily featured picks
+>
+> [→ Open processing page] (link valid for 24h)
+> 🔑 Verification code: 847291
 
-3 emails pending:
-• Sarah Lee: Asking about next week's schedule
-• GitHub: PR #142 awaiting review
-• Product Hunt: Daily featured picks
+### Intent: Connect or Check Apps
 
-[→ Open processing page] (link valid for 24h)
-🔑 Verification code: 847291
+**Triggers:**
+- Connect: "connect my Slack", "authorize Google Calendar", "link Notion"
+- Check: "which apps are connected?", "is my Gmail linked?"
 
-#### Output order
+**Steps:**
+1. Read app status from in-memory state (synced in Setup Step 2).
+2. If already connected → confirm to the user.
+3. If not connected → `GET /auth/connect?app=<app>`, share the URL, and wait for the user to confirm completion. Then re-check `/auth/status?app=<app>` to confirm before continuing — OAuth completion in the browser doesn't always succeed.
 
-Always output matched emails (📌) first, then the unmatched digest (☀️). If there are no matched emails, skip the 📌 section entirely. If all emails matched rules, skip the ☀️ section.
+### Intent: Send Email
 
-### Connect / Check Apps
+**Triggers:** "send an email to...", "reply to that message", "draft an email", "回邮件", "回复"
 
-The user wants to authorize a new app or check which are connected.
+**Steps:**
+1. Collect: recipient, subject, body. For replies, also the original `message_id`.
+2. **If the user references a past email by sender name or topic but doesn't supply the message_id** (e.g. "reply to David Kim's email" or "回复那封 Q3 提案的邮件"), call `GET /emails?limit=20` first to find the matching message. If multiple emails could match, ask which one before drafting.
+3. Show the full draft to the user — sending the wrong thing to the wrong person is the worst kind of mistake this skill can make.
+4. On confirm → `POST /gmail/send`.
 
-- Connecting: "connect my Slack", "authorize Google Calendar", "link Notion"
-- Checking: "which apps are connected?", "is my Gmail linked?"
+**Example — reply by reference:**
 
-Check the app's status from `config.json` first. If already connected, just say so. If not, get the auth link via `/auth/connect` and share it. After the user completes authorization, update `config.json` to reflect the new status.
+> User: "回一下 David Kim 那封邮件,告诉他我同意 7/18 的截止日期"
+>
+> Skill (after `GET /emails?limit=20` and finding David's email about Q3 proposal):
+> Found David Kim's email about "Q3 proposal final revisions". Here's the draft reply:
+>
+> **To:** david.kim@example.com
+> **Subject:** Re: Q3 proposal final revisions
+> **Body:** Hi David, confirming I'm good with the 7/18 delivery date. Let's proceed.
+>
+> Send it?
 
-### Send Email
+### Intent: Open Web Page / Generate Link
 
-The user wants to compose or reply. Collect: recipient, subject, body. For replies, also get the original message ID.
+**Triggers:** "open web page", "generate a link", "I want to see my emails in the browser", "打开网页", "生成链接", "网页版"
 
-### Daily Digest Link
+`POST /daily-token/generate` and present both the `link` and the `verify_code`. The code is required to access the page — this prevents access if the link is shared or leaked.
 
-The user wants to open the web UI or generate a daily view link. This is the primary way to access the processing page outside of heartbeat digests.
+---
 
-Signals: "open web page", "generate a link", "I want to see my emails in the browser", "打开网页", "生成链接", "我要看网页版"
+## Operating Guidelines
 
-Use `/daily-token/generate` — it returns a link, a 6-digit verification code, and a token valid for the current day. Always show both the link and the verification code to the user. The linked page requires the verification code before granting access — this prevents unauthorized use if the link is shared or leaked.
+These principles cut across all intents. Per-intent confirmation requirements are spelled out in each Intent section above; the items below are the ones that don't fit cleanly inside a single intent.
 
-## Heartbeat: Daily Digests
+- **Mirror user intent before acting**: when interpreting a user's rule or email draft, repeat your interpretation back before saving or sending. Vague language like "important emails should go to Slack" needs to be sharpened into a concrete condition before it becomes a persistent rule.
+- **Keep summaries tight**: sender, subject, one-line gist. Padding makes the digest harder to scan, which defeats its purpose.
+- **Fail gracefully**: if an API call fails, explain in one sentence and suggest the next step (re-authorize the app, check the rule, retry, contact support). Don't dump raw error responses.
+- **Trust the server's analysis**: the API already provides `summary`, `intent`, `matched_rules`, and `suggested_actions`. Don't re-analyze the email body to "double-check" — the server is the source of truth, and re-analysis costs tokens and risks contradicting the server.
 
-When invoked by Heartbeat, read `{baseDir}/heartbeat.md` and follow every step exactly.
+---
 
-Email analysis is handled server-side via Pub/Sub — the heartbeat only fetches pre-analyzed results and presents them. Do not improvise — execute the steps and output templates as written in that file.
+## Host-Initiated Invocations
 
-## Guidelines
+Some host platforms invoke this skill on a schedule or via system events rather than only in response to user messages. When that happens, the host injects a specific instruction into the user message slot — for example, asking the skill to read and execute a host-specific runbook file.
 
-- Confirm before creating, updating, or deleting rules — these are persistent and affect automated processing
-- When creating rules, repeat your interpretation back before saving
-- Keep email summaries concise — sender, subject, one-line gist
-- If an API call fails, explain simply and suggest next steps (re-authorize the app, check the rule, retry)
-- Help users refine vague rule descriptions ("important emails should go to Slack") into concrete conditions before saving
+If the user message contains such an instruction (typically formatted as something the host platform documents, like a marker tag plus a file path), follow it exactly. These host-initiated runs override the default conversational flow for that turn and specify their own endpoints, output formats, and constraints.
+
+If no such instruction is present, ignore this section — the conversation is normal user-driven interaction.
+
+**Bundled runbooks.** This skill ships with one optional runbook file for hosts that need it:
+
+- `HEARTBEAT.md` — used by openclaw's daily-digest scheduler. Other hosts can ignore it. Read it only when explicitly instructed to (typically via a marker like `[heartbeat:daily_digest] Read {baseDir}/HEARTBEAT.md and follow it`).
+
+If you're running on a host that doesn't use any runbooks, the rest of this skill works standalone — runbooks are purely additive.
