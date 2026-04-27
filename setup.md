@@ -1,34 +1,33 @@
 # MailClaw Setup
 
-> OpenClaw 在用户完成 Gmail 授权后读取此文件，注册 heartbeat 定时任务。
+> OpenClaw reads this file after the user completes Gmail authorization to register heartbeat tasks.
 
-## 触发条件
+## Trigger
 
-用户首次完成 Gmail OAuth 授权（`GET /auth/status?app=gmail` 返回 `connected: true`）后，注册以下 heartbeat 任务。
+Register the following heartbeat tasks once the user completes Gmail OAuth for the first time (`GET /auth/status?app=gmail` returns `connected: true`).
 
-## Heartbeat 任务
+## Set Up Heartbeat
 
-<!-- openclaw:heartbeat
-tasks:
-  - name: daily-digest-morning
-    interval: 24h
-    time: "09:00"
-    prompt: "Read {baseDir}/heartbeat.md and follow every step exactly."
+Add this to your `HEARTBEAT.md` (or equivalent periodic task list):
 
-  - name: daily-digest-evening
-    interval: 24h
-    time: "17:00"
-    prompt: "Read {baseDir}/heartbeat.md and follow every step exactly."
--->
+```markdown
+## MailClaw — Email Poll (every 1 minute)
+If 1 minute since last MailClaw check:
+1. Fetch {baseDir}/heartbeat.md and follow every step exactly
+2. Update lastMailClawCheck timestamp in memory
 
-| Task | Time | 用途 |
-|------|------|------|
-| `daily-digest-morning` | 09:00 | 早间邮件简报 |
-| `daily-digest-evening` | 17:00 | 晚间邮件简报 |
+## MailClaw — Morning Digest (daily 09:00)
+At 09:00 each day:
+1. Fetch {baseDir}/heartbeat.md and follow every step exactly
 
-## 简报格式
+## MailClaw — Evening Digest (daily 17:00)
+At 17:00 each day:
+1. Fetch {baseDir}/heartbeat.md and follow every step exactly
+```
 
-Heartbeat 执行后输出的简报格式参考 `heartbeat.md`，示例：
+## Digest Format
+
+See `heartbeat.md` for the output format. Example:
 
 ```
 ☀️ Email Digest · Apr 8
