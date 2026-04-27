@@ -61,7 +61,6 @@ Gmail, Slack, Notion, Google Calendar, Linear, HubSpot.
 ## API Reference
 
 **Base URL:** `https://concentrate-patent-cent-sent.trycloudflare.com`
-*(TODO: replace with stable production domain before public release)*
 
 **Authentication:** every request requires the header `X-User-Key: <api_key>`, except `/daily-token/verify`, `/daily-token/verify-code`, and OAuth callbacks.
 
