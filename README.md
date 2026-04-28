@@ -13,7 +13,8 @@ npx skills add tourmind-com/mailclaw
 1. Open the skill — it will guide you through setup
 2. Paste your API key from https://aauth-170125614655.asia-northeast1.run.app/dashboard
 3. Connect Gmail via OAuth
-4. Create your first rule from a template
+4. Read `setup.md` and register the heartbeat tasks defined there
+5. Create your first rule from a template
 
 ## What It Does
 
@@ -21,7 +22,7 @@ npx skills add tourmind-com/mailclaw
 
 **Skill** (conversational): Fetches pre-analyzed results, presents them, and executes user-confirmed actions.
 
-**Heartbeat** (scheduled): Pushes email digests at 09:00 and 17:00 daily.
+**Heartbeat** (scheduled): Polls for new emails every minute, plus daily digests at 09:00 and 17:00.
 
 ## Skill Files
 
@@ -55,8 +56,10 @@ Gmail, Google Calendar, Notion, Slack, Linear, HubSpot.
 
 ```
 User installs skill
-  → Setup: API key → Gmail OAuth → First rule
-    → OpenClaw registers heartbeat (setup.md)
-      → 09:00 / 17:00: fetch emails, push digest (heartbeat.md)
-        → User opens skill to interact with emails (SKILL.md)
+  → Setup: API key → Gmail OAuth
+    → Read setup.md → register heartbeat tasks
+      → Every 1 min: poll for new emails (heartbeat.md)
+      → 09:00 / 17:00: push daily digest (heartbeat.md)
+    → First rule from template
+      → User opens skill to interact with emails (SKILL.md)
 ```
