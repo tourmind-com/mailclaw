@@ -102,6 +102,19 @@ curl -s -H "X-User-Key: $API_KEY" \
 }
 ```
 
+`action_template` may contain both placeholders and resolved app-level values. For example, a Linear rule would include the `team_id` alongside placeholders:
+
+```json
+{
+  "name": "Bug reports → Linear issue",
+  "condition": "Emails about bug reports or error notifications",
+  "app": "linear",
+  "action": "LINEAR_CREATE_LINEAR_ISSUE",
+  "action_template": { "title": "{{subject}}", "description": "{{summary}}", "team_id": "uuid-of-selected-team" },
+  "enabled": true
+}
+```
+
 **Available placeholders for `action_template`:**
 
 - `{{subject}}` — email subject
@@ -111,6 +124,76 @@ curl -s -H "X-User-Key: $API_KEY" \
 - `{{timestamp}}` — email timestamp (ISO)
 
 If the user requests a placeholder not in this list, ask before saving — guessing a name that doesn't exist will result in literal `{{whatever}}` text appearing in the user's downstream systems.
+
+### App-level required parameters
+
+Some apps require configuration that is specific to the user's account — a Linear team, a Notion database, a Slack channel, etc. These values **cannot be guessed** and must be resolved during rule creation by querying the user's connected account.
+
+When creating a rule for an app listed below, the skill **must** collect the required parameters before saving the rule. Store these resolved values in `action_template` alongside any placeholders.
+
+| App | Action | Required param | How to resolve | `action_template` key |
+|---|---|---|---|---|
+| `linear` | `LINEAR_CREATE_LINEAR_ISSUE` | Team | `POST /actions/execute` with `{app: "linear", action: "LINEAR_LIST_LINEAR_TEAMS", params: {}}` → present teams as numbered list → user picks one | `team_id` (UUID) |
+| `notion` | `NOTION_CREATE_NOTION_PAGE` | Parent page or database | `POST /actions/execute` with `{app: "notion", action: "NOTION_FETCH_DATA", params: {}}` → filter results to databases → present as numbered list → user picks one | `parent_id` (UUID) |
+| `slack` | `SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL` | Channel | Ask the user which channel to post to. If the user doesn't know, fetch available channels: `POST /actions/execute` with `{app: "slack", action: "SLACK_LIST_ALL_CHANNELS", params: {}}` → present as numbered list. Store the channel name without `#` prefix (e.g. `general`, not `#general`). | `channel` |
+
+**Resolution flow** (runs between app-authorization check and rule confirmation):
+
+1. Look up the app + action in the table above.
+2. If a required param exists and needs an API call → execute the resolve action.
+3. Present the results as a numbered list:
+   ```
+   Which <param> should this rule use?
+   1. Engineering
+   2. Product
+   3. Design
+   ```
+4. Wait for the user to pick one.
+5. Inject the resolved value into `action_template` (e.g. `"team_id": "uuid-here"`).
+6. If the resolve call fails (app not connected, API error), surface the error and don't proceed — a rule saved without required params will fail silently on every trigger.
+
+**Example — Linear rule with team resolution:**
+
+> User: "When I get a bug report email, create a Linear issue."
+>
+> Skill: Let me check your Linear teams...
+> *(calls `POST /actions/execute` with `LINEAR_LIST_LINEAR_TEAMS`)*
+>
+> Which team should bug-report issues go to?
+> 1. Engineering
+> 2. QA
+> 3. Platform
+>
+> User: 1
+>
+> Skill: Got it. Here's the rule:
+> - **Condition:** emails about bug reports or error notifications
+> - **Action:** create a Linear issue in **Engineering**
+> - **Template:** `{"title": "{{subject}}", "description": "{{summary}}", "team_id": "team-uuid-123"}`
+>
+> Confirm to save?
+
+**Example — Notion rule with database resolution (onboarding template):**
+
+> *(User picks 📌 Client emails → Notion task during onboarding)*
+>
+> Skill: Notion is connected. Let me fetch your databases...
+> *(calls `POST /actions/execute` with `NOTION_FETCH_DATA`)*
+>
+> Which database should client email tasks go to?
+> 1. Tasks Board
+> 2. CRM Pipeline
+> 3. Project Tracker
+>
+> User: 1
+>
+> Skill: Here's the rule:
+> - **Name:** Client emails → Notion task
+> - **Condition:** emails from important contacts or clients
+> - **Action:** create a page in **Tasks Board**
+> - **Template:** `{"title": "{{subject}}", "markdown": "{{summary}}", "parent_id": "db-uuid-456"}`
+>
+> Confirm to save?
 
 ---
 
@@ -194,8 +277,9 @@ Template definitions:
 When the user picks a template:
 1. Check the target app's connection status (in-memory from Step 2).
 2. If not connected → run the **App Authorization** flow for that app first.
-3. Show the parsed rule to the user and ask for confirmation — rules are persistent and affect every future email, so confirming protects against typos and misinterpretations.
-4. On confirm → `POST /rules`.
+3. **Resolve app-level required parameters** if the template's app requires them (see "App-level required parameters" table). For example, the Notion template needs a `parent_id` — fetch the user's databases via `NOTION_FETCH_DATA` and let them pick one. The Slack template needs a `channel` — ask the user which channel to use (or fetch via `SLACK_LIST_ALL_CHANNELS` if they don't know).
+4. Show the parsed rule to the user and ask for confirmation — rules are persistent and affect every future email, so confirming protects against typos and misinterpretations.
+5. On confirm → `POST /rules`.
 
 ---
 
@@ -212,8 +296,9 @@ Identify which intent the user's message maps to and follow the matching section
 2. **If the user's intent closely matches one of the three onboarding templates** (Client emails → Notion, Meeting invites → Calendar, Feedback → Slack), suggest the template instead of building a custom rule from scratch — templates use vetted condition/action wording that the server's classifier is already tuned for. Only fall through to a custom rule if the user declines the template or their intent genuinely differs.
 3. Identify which placeholders the action template needs (e.g., a calendar event needs a title and description; a Slack message needs a channel and text).
 4. Check the target app's connection status. If not connected → run **App Authorization** first.
-5. Summarize the parsed rule back in plain language. Show the JSON body that will be sent.
-6. Wait for explicit confirmation, then `POST /rules`.
+5. **Resolve app-level required parameters.** Check the "App-level required parameters" table. If the chosen app + action has a required param, run the resolution flow (fetch options → present list → user picks). Inject the resolved value into `action_template`. Do not skip this step — a rule missing required params will fail on every trigger.
+6. Summarize the parsed rule back in plain language. Show the JSON body that will be sent.
+7. Wait for explicit confirmation, then `POST /rules`.
 
 **Example:**
 
