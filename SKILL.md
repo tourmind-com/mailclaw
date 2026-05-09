@@ -248,7 +248,8 @@ If a later API call fails with 401/403 on a specific app, re-fetch `/auth/status
 Gmail is the foundation — without it, no rules can fire and no emails can be fetched.
 
 - If Gmail is **not** connected: call `GET /auth/connect?app=gmail` **with the `X-User-Key` header**, parse the JSON response, and share **only the `url` field from the response** (the provider-hosted OAuth URL like `accounts.google.com/...`) with the user. Do **not** paste the `/auth/connect` URL itself — the user's browser cannot send the `X-User-Key` header and will get `{"detail":"Missing X-User-Key header"}`. After the user confirms they finished, re-call `GET /auth/status?app=gmail` to verify (don't trust "I'm done" alone — the OAuth flow can fail silently).
-- The first time Gmail transitions from disconnected to connected in this session, run the **First-Rule Onboarding** below.
+- **Once Gmail transitions from disconnected to connected in this session**, the skill MUST register the background heartbeat tasks before anything else. Read `{baseDir}/setup.md` and follow its instructions exactly — this installs the 1-minute email poll and the morning/evening digest schedules into the host's periodic task list. Without this step, the user will **never** receive automatic digests and every rule match will sit unseen until they manually ask "any new email?". Do not skip this even if the user asks an unrelated question right after connecting — register first, then answer. If the host platform does not support periodic tasks, log that `setup.md` was inapplicable and continue.
+- After heartbeat registration succeeds (or is skipped because the host is non-periodic), run the **First-Rule Onboarding** below.
 - If Gmail is already connected on entry: skip onboarding and proceed to whatever the user asked for.
 
 ### First-Rule Onboarding (only after fresh Gmail connect)
@@ -524,8 +525,9 @@ If the user message contains such an instruction (typically formatted as somethi
 
 If no such instruction is present, ignore this section — the conversation is normal user-driven interaction.
 
-**Bundled runbooks.** This skill ships with one optional runbook file for hosts that need it:
+**Bundled runbooks.** This skill ships with two companion files:
 
-- `HEARTBEAT.md` — used by openclaw's daily-digest scheduler. Other hosts can ignore it. Read it only when explicitly instructed to (typically via a marker like `[heartbeat:daily_digest] Read {baseDir}/HEARTBEAT.md and follow it`).
+- `setup.md` — one-time installer. The skill reads it automatically the first time Gmail transitions to connected (see Step 3 of the Setup Flow). It registers the email-poll and daily-digest heartbeats into the host's periodic task list. Hosts without periodic task support can no-op on it.
+- `heartbeat.md` — the runbook executed by the heartbeats that `setup.md` registered. Read it only when the host's scheduler fires one of those tasks (typically via a marker like `[heartbeat:daily_digest] Read {baseDir}/heartbeat.md and follow it`). You do not need to read it during normal conversational turns.
 
 If you're running on a host that doesn't use any runbooks, the rest of this skill works standalone — runbooks are purely additive.
