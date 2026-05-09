@@ -64,13 +64,15 @@ Gmail, Slack, Notion, Google Calendar, Linear, HubSpot.
 
 **Authentication:** every request requires the header `X-User-Key: <api_key>`, except `/daily-token/verify`, `/daily-token/verify-code`, and OAuth callbacks.
 
+> ⚠️ **Never paste a raw `*.trycloudflare.com` API URL to the user as a clickable link.** All MailClaw API endpoints (including `/auth/connect`) require the `X-User-Key` header, which a browser cannot send when the user clicks a link. You (the skill) must `curl` the endpoint yourself with the header, parse the JSON response, and share only the provider-hosted OAuth URL (e.g. `accounts.google.com/...`, `linear.app/oauth/...`, `slack.com/oauth/...`) that comes back in the `url` field. If you ever find yourself about to send the user a link that starts with the MailClaw base URL, stop — that's the bug.
+
 ### Endpoints
 
 | Purpose | Method | Path | Body / Params |
 |---|---|---|---|
 | Check one app's auth | GET | `/auth/status?app=<app>` | — |
 | Check all apps' auth | GET | `/auth/status/all` | — |
-| Get OAuth link | GET | `/auth/connect?app=<app>` | — |
+| Get OAuth link | GET | `/auth/connect?app=<app>` | returns `{ "url": "<provider_oauth_url>" }` — this is the URL to share with the user |
 | List recent emails | GET | `/emails?limit=<n>` | — |
 | List unprocessed emails | GET | `/emails?unprocessed_only=true` | — |
 | Get one email | GET | `/gmail/messages/{id}` | — |
@@ -245,7 +247,7 @@ If a later API call fails with 401/403 on a specific app, re-fetch `/auth/status
 
 Gmail is the foundation — without it, no rules can fire and no emails can be fetched.
 
-- If Gmail is **not** connected: call `GET /auth/connect?app=gmail`, share the link, and wait for the user to confirm completion. After they confirm, re-call `GET /auth/status?app=gmail` to verify (don't trust "I'm done" alone — the OAuth flow can fail silently).
+- If Gmail is **not** connected: call `GET /auth/connect?app=gmail` **with the `X-User-Key` header**, parse the JSON response, and share **only the `url` field from the response** (the provider-hosted OAuth URL like `accounts.google.com/...`) with the user. Do **not** paste the `/auth/connect` URL itself — the user's browser cannot send the `X-User-Key` header and will get `{"detail":"Missing X-User-Key header"}`. After the user confirms they finished, re-call `GET /auth/status?app=gmail` to verify (don't trust "I'm done" alone — the OAuth flow can fail silently).
 - The first time Gmail transitions from disconnected to connected in this session, run the **First-Rule Onboarding** below.
 - If Gmail is already connected on entry: skip onboarding and proceed to whatever the user asked for.
 
@@ -470,7 +472,7 @@ Generate the link via `POST /daily-token/generate`. Use `link` and `verify_code`
 **Steps:**
 1. Read app status from in-memory state (synced in Setup Step 2).
 2. If already connected → confirm to the user.
-3. If not connected → `GET /auth/connect?app=<app>`, share the URL, and wait for the user to confirm completion. Then re-check `/auth/status?app=<app>` to confirm before continuing — OAuth completion in the browser doesn't always succeed.
+3. If not connected → call `GET /auth/connect?app=<app>` **with the `X-User-Key` header**, then share **only the `url` field from the JSON response** (the provider's OAuth URL, e.g. `linear.app/oauth/authorize?...`). Never share the `/auth/connect` URL directly — it requires a header the browser can't send and will return `Missing X-User-Key header`. Wait for the user to confirm completion, then re-check `/auth/status?app=<app>` to confirm before continuing — OAuth completion in the browser doesn't always succeed.
 
 ### Intent: Send Email
 
