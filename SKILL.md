@@ -82,7 +82,7 @@ Gmail, Slack, Notion, Google Calendar, Linear, HubSpot.
 | Update rule | PUT | `/rules/{id}` | partial fields |
 | Delete rule | DELETE | `/rules/{id}` | — |
 | Execute a suggested action | POST | `/actions/execute` | `{app, action, params}` |
-| Suggest tools by natural language | POST | `/actions/suggest` | `{query, app?}` — returns `{app, suggestions: [{name, description, reason}], cached?}` |
+| Suggest tools by natural language | POST | `/actions/suggest` | `{query, app?}` — returns `{app, suggestions: [{name, description, toolkits}], guidance?, cached?, message?}` |
 | Generate daily digest token | POST | `/daily-token/generate` | returns `{token, verify_code, link, date}` |
 
 Use `curl` or any HTTP tool. Example:
@@ -144,10 +144,15 @@ Response:
 {
   "app": "notion",
   "suggestions": [
-    {"name": "NOTION_CREATE_NOTION_PAGE", "description": "Create a new page in Notion", "reason": "Best match for creating a task from email content"}
-  ]
+    {"name": "NOTION_CREATE_NOTION_PAGE", "description": "Create a new page in Notion", "toolkits": ["notion"]}
+  ],
+  "guidance": ["optional next-step hints from the search engine"]
 }
 ```
+
+When no tools match, the response includes `"suggestions": []` and `"message": "未找到匹配的操作"`. When the result comes from cache, `"cached": true` is added.
+
+If `app` is omitted in the request, the server infers it from search results and returns the detected app name in the response.
 
 Use this endpoint whenever the skill needs to determine which action to use — during rule creation, action execution, or when the user asks what's available. The action names in rule schema examples below (like `GOOGLECALENDAR_CREATE_EVENT`) are illustrative; always use `/actions/suggest` to get the actual action name rather than guessing.
 
@@ -557,7 +562,8 @@ Generate the link via `POST /daily-token/generate`. Use `link` and `verify_code`
 2. **SLACK_LIST_ALL_CHANNELS** — List all available channels
 ```
 
-4. If the user picks one, proceed to the relevant intent (execute action, create rule, etc.) using the selected tool's `name` as the action.
+4. If the response contains `message` (no matches found), tell the user no matching tools were found and suggest rephrasing or specifying a different app.
+5. If the user picks one, proceed to the relevant intent (execute action, create rule, etc.) using the selected tool's `name` as the action.
 
 **Example — implicit trigger:**
 
