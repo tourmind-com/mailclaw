@@ -82,6 +82,7 @@ Gmail, Slack, Notion, Google Calendar, Linear, HubSpot.
 | Update rule | PUT | `/rules/{id}` | partial fields |
 | Delete rule | DELETE | `/rules/{id}` | — |
 | Execute a suggested action | POST | `/actions/execute` | `{app, action, params}` |
+| Suggest tools by natural language | POST | `/actions/suggest` | `{query, app?}` — returns `{app, suggestions: [{name, description, reason}], cached?}` |
 | Generate daily digest token | POST | `/daily-token/generate` | returns `{token, verify_code, link, date}` |
 
 Use `curl` or any HTTP tool. Example:
@@ -127,39 +128,52 @@ curl -s -H "X-User-Key: $API_KEY" \
 
 If the user requests a placeholder not in this list, ask before saving — guessing a name that doesn't exist will result in literal `{{whatever}}` text appearing in the user's downstream systems.
 
+### Discovering available actions with `/actions/suggest`
+
+Each app has many available tools — the skill does not hardcode them. When the user describes what they want to do with an app, call `POST /actions/suggest` to dynamically discover the best-matching action:
+
+```bash
+curl -s -X POST -H "X-User-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "create a task from email", "app": "notion"}' \
+  "$BASE_URL/actions/suggest"
+```
+
+Response:
+```json
+{
+  "app": "notion",
+  "suggestions": [
+    {"name": "NOTION_CREATE_NOTION_PAGE", "description": "Create a new page in Notion", "reason": "Best match for creating a task from email content"}
+  ]
+}
+```
+
+Use this endpoint whenever the skill needs to determine which action to use — during rule creation, action execution, or when the user asks what's available. The action names in rule schema examples below (like `GOOGLECALENDAR_CREATE_EVENT`) are illustrative; always use `/actions/suggest` to get the actual action name rather than guessing.
+
 ### App-level required parameters
 
-Some apps require configuration that is specific to the user's account — a Linear team, a Notion database, a Slack channel, etc. These values **cannot be guessed** and must be resolved during rule creation by querying the user's connected account.
+Some actions require configuration specific to the user's account — a Linear team, a Notion database, a Slack channel, etc. These values **cannot be guessed** and must be resolved during rule creation by querying the user's connected account.
 
-When creating a rule for an app listed below, the skill **must** collect the required parameters before saving the rule. Store these resolved values in `action_template` alongside any placeholders.
+Because the set of apps and actions is dynamic, the skill cannot hardcode which parameters each action needs. Instead, after selecting an action via `/actions/suggest`, use this flow to discover and resolve required parameters:
 
-| App | Action | Required param | How to resolve | `action_template` key |
-|---|---|---|---|---|
-| `linear` | `LINEAR_CREATE_LINEAR_ISSUE` | Team | `POST /actions/execute` with `{app: "linear", action: "LINEAR_LIST_LINEAR_TEAMS", params: {}}` → present teams as numbered list → user picks one | `team_id` (UUID) |
-| `notion` | `NOTION_CREATE_NOTION_PAGE` | Parent page or database | `POST /actions/execute` with `{app: "notion", action: "NOTION_FETCH_DATA", params: {}}` → filter results to databases → present as numbered list → user picks one | `parent_id` (UUID) |
-| `slack` | `SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL` | Channel | Ask the user which channel to post to. If the user doesn't know, fetch available channels: `POST /actions/execute` with `{app: "slack", action: "SLACK_LIST_ALL_CHANNELS", params: {}}` → present as numbered list. Store the channel name without `#` prefix (e.g. `general`, not `#general`). | `channel` |
+1. Look at the action's `description` from the suggest response — it often hints at what's needed (e.g. "send a message to a channel" implies a channel param is required).
+2. For common patterns, use `/actions/suggest` again to find the relevant listing/fetching action. For example, if the action needs a team, suggest with `query: "list teams"` for that app; if it needs a channel, suggest with `query: "list channels"`.
+3. Execute the listing action via `POST /actions/execute` to get available options.
+4. Present the results as a numbered list and let the user pick.
+5. Inject the resolved value into `action_template`.
+6. If the resolve call fails, surface the error and don't proceed — a rule saved without required params will fail silently on every trigger.
 
-**Resolution flow** (runs between app-authorization check and rule confirmation):
-
-1. Look up the app + action in the table above.
-2. If a required param exists and needs an API call → execute the resolve action.
-3. Present the results as a numbered list:
-   ```
-   Which <param> should this rule use?
-   1. Engineering
-   2. Product
-   3. Design
-   ```
-4. Wait for the user to pick one.
-5. Inject the resolved value into `action_template` (e.g. `"team_id": "uuid-here"`).
-6. If the resolve call fails (app not connected, API error), surface the error and don't proceed — a rule saved without required params will fail silently on every trigger.
-
-**Example — Linear rule with team resolution:**
+**Example — Linear rule with dynamic action discovery and team resolution:**
 
 > User: "When I get a bug report email, create a Linear issue."
 >
-> Skill: Let me check your Linear teams...
-> *(calls `POST /actions/execute` with `LINEAR_LIST_LINEAR_TEAMS`)*
+> Skill *(calls `POST /actions/suggest` with `{query: "create issue", app: "linear"}`)*:
+> Found action: **LINEAR_CREATE_LINEAR_ISSUE** — Create a new issue in Linear.
+>
+> Let me check your Linear teams...
+> *(calls `POST /actions/suggest` with `{query: "list teams", app: "linear"}` → gets `LINEAR_LIST_LINEAR_TEAMS`)*
+> *(calls `POST /actions/execute` with `{app: "linear", action: "LINEAR_LIST_LINEAR_TEAMS", params: {}}`)*
 >
 > Which team should bug-report issues go to?
 > 1. Engineering
@@ -179,8 +193,12 @@ When creating a rule for an app listed below, the skill **must** collect the req
 
 > *(User picks 📌 Client emails → Notion task during onboarding)*
 >
-> Skill: Notion is connected. Let me fetch your databases...
-> *(calls `POST /actions/execute` with `NOTION_FETCH_DATA`)*
+> Skill *(calls `POST /actions/suggest` with `{query: "create page", app: "notion"}`)*:
+> Found action: **NOTION_CREATE_NOTION_PAGE**.
+>
+> Let me fetch your databases...
+> *(calls `POST /actions/suggest` with `{query: "fetch databases", app: "notion"}` → gets `NOTION_FETCH_DATA`)*
+> *(calls `POST /actions/execute` with `{app: "notion", action: "NOTION_FETCH_DATA", params: {}}`)*
 >
 > Which database should client email tasks go to?
 > 1. Tasks Board
@@ -271,18 +289,19 @@ Or describe a custom rule in your own words.
 
 Template definitions:
 
-| Template | label | condition | app | action |
+| Template | label | condition | app | suggest query |
 |---|---|---|---|---|
-| 📌 Client emails → Notion task | `Client email` | "Emails from important contacts or clients" | `notion` | `NOTION_CREATE_NOTION_PAGE` |
-| 📅 Meeting invites → Calendar event | `Meeting invite` | "Emails containing meeting invites, schedules, or calendar requests" | `googlecalendar` | `GOOGLECALENDAR_CREATE_EVENT` |
-| 💬 Feedback emails → Slack alert | `Feedback` | "Emails containing feedback, reviews, or user complaints" | `slack` | `SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL` |
+| 📌 Client emails → Notion task | `Client email` | "Emails from important contacts or clients" | `notion` | `"create page"` |
+| 📅 Meeting invites → Calendar event | `Meeting invite` | "Emails containing meeting invites, schedules, or calendar requests" | `googlecalendar` | `"create event"` |
+| 💬 Feedback emails → Slack alert | `Feedback` | "Emails containing feedback, reviews, or user complaints" | `slack` | `"send message to channel"` |
 
 When the user picks a template:
 1. Check the target app's connection status (in-memory from Step 2).
 2. If not connected → run the **App Authorization** flow for that app first.
-3. **Resolve app-level required parameters** if the template's app requires them (see "App-level required parameters" table). For example, the Notion template needs a `parent_id` — fetch the user's databases via `NOTION_FETCH_DATA` and let them pick one. The Slack template needs a `channel` — ask the user which channel to use (or fetch via `SLACK_LIST_ALL_CHANNELS` if they don't know).
-4. Show the parsed rule to the user and ask for confirmation — rules are persistent and affect every future email, so confirming protects against typos and misinterpretations.
-5. On confirm → `POST /rules`.
+3. **Discover the action** by calling `POST /actions/suggest` with `{query: <suggest query from table>, app: <app>}`. Use the top suggestion's `name` as the action for the rule.
+4. **Resolve app-level required parameters** using the dynamic resolution flow (see "App-level required parameters" section). Use `/actions/suggest` to find the right listing action for the app, then execute it to let the user pick.
+5. Show the parsed rule to the user and ask for confirmation — rules are persistent and affect every future email, so confirming protects against typos and misinterpretations.
+6. On confirm → `POST /rules`.
 
 ---
 
@@ -297,19 +316,26 @@ Identify which intent the user's message maps to and follow the matching section
 **Steps:**
 1. Extract the **condition** (what kind of email triggers it) and the **action** (what should happen, on which app).
 2. **If the user's intent closely matches one of the three onboarding templates** (Client emails → Notion, Meeting invites → Calendar, Feedback → Slack), suggest the template instead of building a custom rule from scratch — templates use vetted condition/action wording that the server's classifier is already tuned for. Only fall through to a custom rule if the user declines the template or their intent genuinely differs.
-3. Identify which placeholders the action template needs (e.g., a calendar event needs a title and description; a Slack message needs a channel and text).
-4. Check the target app's connection status. If not connected → run **App Authorization** first.
-5. **Resolve app-level required parameters.** Check the "App-level required parameters" table. If the chosen app + action has a required param, run the resolution flow (fetch options → present list → user picks). Inject the resolved value into `action_template`. Do not skip this step — a rule missing required params will fail on every trigger.
-6. Summarize the parsed rule back in plain language. Show the JSON body that will be sent.
-7. Wait for explicit confirmation, then `POST /rules`.
+3. **Discover the action dynamically.** Call `POST /actions/suggest` with `{query: <user's described action>, app: <target app>}` to find the best-matching action. If the suggestions return multiple options, present them and let the user pick. Do not guess action names — they vary across apps and new tools are added regularly.
+4. Identify which placeholders the action template needs (e.g., a calendar event needs a title and description; a Slack message needs a channel and text).
+5. Check the target app's connection status. If not connected → run **App Authorization** first.
+6. **Resolve app-level required parameters** using the dynamic resolution flow described in the "App-level required parameters" section. Use `/actions/suggest` to find listing/fetching actions for the target app, then execute them to get options for the user to pick from.
+7. Summarize the parsed rule back in plain language. Show the JSON body that will be sent.
+8. Wait for explicit confirmation, then `POST /rules`.
 
 **Example:**
 
 > User: "When I get an email from a customer, save it as a task in Notion."
 >
-> Skill: I'll create this rule:
+> Skill *(calls `POST /actions/suggest` with `{query: "create task page", app: "notion"}`)*:
+> Found action: **NOTION_CREATE_NOTION_PAGE** — Create a new page in Notion.
+>
+> *(resolves required params: fetches databases, user picks "Tasks Board")*
+>
+> I'll create this rule:
 > - **Condition:** emails from customers or clients
-> - **Action:** create a page in Notion with the email subject as title and summary as body
+> - **Action:** create a page in **Tasks Board** with email subject as title and summary as body
+> - **Template:** `{"title": "{{subject}}", "markdown": "{{summary}}", "parent_id": "db-uuid-456"}`
 >
 > Confirm to save?
 
@@ -485,7 +511,20 @@ Generate the link via `POST /daily-token/generate`. Use `link` and `verify_code`
 3. Show the full draft to the user — sending the wrong thing to the wrong person is the worst kind of mistake this skill can make.
 4. On confirm → `POST /gmail/send`.
 
-**Example — reply by reference:**
+**Example — reply by reference (English):**
+
+> User: "Reply to David Kim's email and tell him I agree with the 7/18 deadline"
+>
+> Skill (after `GET /emails?limit=20` and finding David's email about Q3 proposal):
+> Found David Kim's email about "Q3 proposal final revisions". Here's the draft reply:
+>
+> **To:** david.kim@example.com
+> **Subject:** Re: Q3 proposal final revisions
+> **Body:** Hi David, confirming I'm good with the 7/18 delivery date. Let's proceed.
+>
+> Send it?
+
+**Example — reply by reference (Chinese):**
 
 > User: "回一下 David Kim 那封邮件,告诉他我同意 7/18 的截止日期"
 >
@@ -497,6 +536,51 @@ Generate the link via `POST /daily-token/generate`. Use `link` and `verify_code`
 > **Body:** Hi David, confirming I'm good with the 7/18 delivery date. Let's proceed.
 >
 > Send it?
+
+### Intent: Suggest Tools / Find Available Actions
+
+**Triggers:**
+- Explicit: "what can I do with Notion", "show me available actions", "what tools are available for Slack", "有什么工具可以用", "Slack 能做什么", "有哪些操作"
+- Implicit: when the user describes a goal but doesn't specify a concrete action — e.g. "I want to send a message on Slack", "I want to save something to Notion", "help me create something in Linear", "我想在 Slack 给团队发消息", "帮我在 Linear 上建点东西". If the user's intent clearly maps to an email automation rule (like "when I get X email, do Y"), route to the Create Rule intent instead — it already calls `/actions/suggest` internally. Use this intent when the user wants to explore or directly execute an action outside of the rule flow.
+
+**Steps:**
+1. Build the request body:
+   - `query`: the user's natural language description.
+   - `app` (optional): if the user explicitly mentioned an app name, include it. Otherwise omit and let the server infer.
+2. `POST /actions/suggest` with `{query, app?}`.
+3. Present the results as a numbered list:
+
+```
+🔍 Found <N> suggested tools for "<app>":
+
+1. **SLACK_SEND_MESSAGE** — Send a message to a Slack channel
+2. **SLACK_LIST_ALL_CHANNELS** — List all available channels
+```
+
+4. If the user picks one, proceed to the relevant intent (execute action, create rule, etc.) using the selected tool's `name` as the action.
+
+**Example — implicit trigger:**
+
+> User: "I want to send a message to my team on Slack"
+>
+> Skill (calls `POST /actions/suggest` with `{query: "send message to team", app: "slack"}`):
+>
+> 🔍 Found 2 suggested tools for "slack":
+> 1. **SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL** — Send a message to a channel
+> 2. **SLACK_SEND_DIRECT_MESSAGE** — Send a direct message to a user
+>
+> Which one do you need?
+
+**Example — explicit trigger:**
+
+> User: "What actions are available for Notion?"
+>
+> Skill (calls `POST /actions/suggest` with `{query: "available actions", app: "notion"}`):
+>
+> 🔍 Found 3 suggested tools for "notion":
+> 1. **NOTION_CREATE_NOTION_PAGE** — Create a new page
+> 2. **NOTION_FETCH_DATA** — Fetch databases and pages
+> 3. **NOTION_UPDATE_NOTION_PAGE** — Update an existing page
 
 ### Intent: Open Web Page / Generate Link
 
