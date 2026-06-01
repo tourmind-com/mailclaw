@@ -1,6 +1,6 @@
 # MailClaw
 
-> Turn your Gmail inbox into an automation hub — create rules, view AI-analyzed emails, and connect apps like Slack, Notion, Calendar, Linear, and HubSpot.
+> **AI-powered Gmail automation skill.** Turn your inbox into an automation hub: create email rules, get AI-summarized digests, auto-triage important messages, and connect Gmail with Slack, Notion, Google Calendar, Linear, and HubSpot — all from natural-language commands.
 
 ## Install
 
@@ -63,3 +63,17 @@ User installs skill
     → First rule from template
       → User opens skill to interact with emails (SKILL.md)
 ```
+
+## Use Cases
+
+- **Inbox zero with AI** — auto-triage emails into actionable cards and a skip-able digest
+- **Email-to-task automation** — convert client emails into Notion tasks or Linear issues automatically
+- **Meeting management** — turn meeting invite emails into Google Calendar events
+- **Team alerting** — forward feedback / support / urgent emails to Slack channels
+- **Smart replies** — draft and send Gmail replies via natural-language commands
+- **Daily email digest** — get a summarized brief of your inbox at 09:00 and 17:00
+- **Multi-app workflows** — orchestrate Gmail with Slack, Notion, Calendar, Linear, and HubSpot from one skill
+
+## Keywords
+
+Gmail automation, email automation, AI email assistant, smart inbox, mail rules, email triage, inbox zero, Gmail rules, email digest, email-to-Slack, email-to-Notion, email-to-Calendar, email-to-Linear, email-to-HubSpot, email workflow, productivity skill, OpenClaw skill, MailClaw.
