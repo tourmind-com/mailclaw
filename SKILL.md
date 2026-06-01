@@ -1,6 +1,6 @@
 ---
 name: mailclaw
-description: Email-driven automation for Gmail. Use this skill whenever the user mentions email, inbox, Gmail, or describes any workflow that turns incoming email into action — creating rules, checking new messages, connecting apps like Slack/Notion/Calendar/Linear/HubSpot, forwarding email content, or sending replies. Trigger even when the user does not say "email" explicitly but describes the pattern, like "when someone sends me a meeting invite, add it to my calendar" or "ping Slack when a support ticket comes in". Also trigger on Chinese keywords: 邮件, 邮箱, 收件箱, 新邮件, 查邮件, 收邮件, 邮件规则, 邮件自动化.
+description: AI-powered Gmail automation, email triage, and smart inbox assistant. Use this skill whenever the user mentions email, inbox, Gmail, mail rules, email digest, or describes any workflow that turns incoming email into action — creating rules, checking new messages, summarizing email, connecting apps like Slack/Notion/Google Calendar/Linear/HubSpot, forwarding email content, or sending replies. Trigger even when the user does not say "email" explicitly but describes the pattern, like "when someone sends me a meeting invite, add it to my calendar" or "ping Slack when a support ticket comes in". Also trigger on Chinese keywords: 邮件, 邮箱, 收件箱, 新邮件, 查邮件, 收邮件, 邮件规则, 邮件自动化, 邮件助手, 邮件摘要.
 metadata.openclaw: {"emoji": "📧", "primaryEnv": "MAILCLAW_API_KEY"}
 ---
 
